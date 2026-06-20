@@ -21,9 +21,8 @@ export type ExplainResult = {
 
 function clientOllamaConfig() {
   const enabled = process.env.NEXT_PUBLIC_OLLAMA_ENABLED;
-  // Vercel / cloud deploy: Ollama off unless explicitly NEXT_PUBLIC_OLLAMA_ENABLED=true
-  if (enabled !== "true") {
-    return { enabled: false, base: "", model: "", timeoutMs: 0, numGpu: 0 };
+  if (enabled === "false") {
+    return { enabled: false, base: "", model: "", timeoutMs: 0 };
   }
   const base = (process.env.NEXT_PUBLIC_OLLAMA_BASE_URL || DEFAULT_OLLAMA_BASE).replace(/\/$/, "");
   const model = process.env.NEXT_PUBLIC_OLLAMA_MODEL || DEFAULT_OLLAMA_MODEL;
@@ -33,14 +32,14 @@ function clientOllamaConfig() {
   return { enabled: true, base, model, timeoutMs, numGpu };
 }
 
-function ollamaFailureMessage(err: unknown): string {
+function ollamaFailureMessage(err: unknown, model: string): string {
   if (err instanceof DOMException && err.name === "AbortError") {
-    return "Ollama timed out — increase NEXT_PUBLIC_OLLAMA_TIMEOUT_MS (gemma4:e4b often needs 60–120s).";
+    return `Ollama timed out — increase NEXT_PUBLIC_OLLAMA_TIMEOUT_MS (${model} may need 30–120s).`;
   }
   const msg = err instanceof Error ? err.message : String(err);
   if (/failed to fetch|networkerror|cors/i.test(msg)) {
     return (
-      "Browser cannot reach Ollama. Start Ollama (ollama serve), pull the model (ollama pull gemma4:e4b), " +
+      `Browser cannot reach Ollama. Start Ollama (ollama serve), pull the model (ollama pull ${model}), ` +
       "and set CORS: OLLAMA_ORIGINS=http://localhost:3000 then restart Ollama."
     );
   }
@@ -93,8 +92,8 @@ export async function fetchBrowserOllamaExplanation(
     if (!verified) {
       return {
         error:
-          "Ollama returned no generated tokens (eval_count=0 or empty content). " +
-          "Check think:false and that gemma4:e4b is pulled.",
+          `Ollama returned no generated tokens (eval_count=0 or empty content). ` +
+          `Check think:false and that ${model} is pulled.`,
       };
     }
     if (isTemplateExplanation(outlet, verified.text)) {
@@ -103,7 +102,7 @@ export async function fetchBrowserOllamaExplanation(
 
     return { result: verified, clientDurationMs: Date.now() - started };
   } catch (err) {
-    return { error: ollamaFailureMessage(err) };
+    return { error: ollamaFailureMessage(err, model) };
   } finally {
     clearTimeout(timer);
   }
@@ -131,50 +130,29 @@ async function fetchServerFallback(
 }
 
 /**
- * Cloud deploy (Vercel): Gemini → template via /api/explain.
- * Local hybrid: Ollama in browser when NEXT_PUBLIC_OLLAMA_ENABLED=true, else same cloud path.
+ * Browser-first XAI: Ollama on the client → server Gemini → template.
  */
 export async function resolveExplanation(outlet: Outlet): Promise<ExplainResult> {
-  const { enabled: ollamaEnabled } = clientOllamaConfig();
-
-  if (ollamaEnabled) {
-    const ollamaAttempt = await fetchBrowserOllamaExplanation(outlet);
-    if ("result" in ollamaAttempt) {
-      return {
-        explanation: ollamaAttempt.result.text,
-        source: "ollama",
-        meta: ollamaAttempt.result.meta,
-      };
-    }
-
-    const ollamaError = ollamaAttempt.error;
-    try {
-      const fallback = await fetchServerFallback(outlet);
-      return {
-        explanation: fallback.explanation,
-        source: fallback.source,
-        meta: fallback.meta,
-        warning:
-          fallback.source === "template"
-            ? `Ollama unavailable (${ollamaError}). Used deterministic template.`
-            : `Ollama unavailable (${ollamaError}). Used ${fallback.source} fallback.`,
-      };
-    } catch (err) {
-      return {
-        explanation: "",
-        source: "template",
-        error: err instanceof Error ? err.message : "Explain request failed",
-      };
-    }
+  const ollamaAttempt = await fetchBrowserOllamaExplanation(outlet);
+  if ("result" in ollamaAttempt) {
+    return {
+      explanation: ollamaAttempt.result.text,
+      source: "ollama",
+      meta: ollamaAttempt.result.meta,
+    };
   }
 
+  const ollamaError = ollamaAttempt.error;
   try {
-    const cloud = await fetchServerFallback(outlet);
+    const fallback = await fetchServerFallback(outlet);
     return {
-      explanation: cloud.explanation,
-      source: cloud.source,
-      meta: cloud.meta,
-      warning: cloud.warning,
+      explanation: fallback.explanation,
+      source: fallback.source,
+      meta: fallback.meta,
+      warning:
+        fallback.source === "template"
+          ? `Ollama unavailable (${ollamaError}). Used deterministic template.`
+          : `Ollama unavailable (${ollamaError}). Used ${fallback.source} fallback.`,
     };
   } catch (err) {
     return {

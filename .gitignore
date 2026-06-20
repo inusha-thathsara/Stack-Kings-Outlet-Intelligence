@@ -16,3 +16,6 @@ pnpm-debug.log*
 .env
 .env*.local
 !.env.example
+
+# Large export — use Neon DATABASE_URL in production
+public/data/outlets.json
